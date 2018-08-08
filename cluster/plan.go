@@ -428,6 +428,8 @@ func (c *Cluster) BuildKubeProxyProcess(host *hosts.Host, prefixPath string) v3.
 		"cluster-cidr": c.ClusterCIDR,
 		"v":            "2",
 		"healthz-bind-address": "0.0.0.0",
+                "proxy-mode":"ipvs",
+                "masquerade-all":"true",
 		"hostname-override":    host.HostnameOverride,
 		"kubeconfig":           pki.GetConfigPath(pki.KubeProxyCertName),
 	}
@@ -445,6 +447,7 @@ func (c *Cluster) BuildKubeProxyProcess(host *hosts.Host, prefixPath string) v3.
 	}
 	Binds := []string{
 		fmt.Sprintf("%s:/etc/kubernetes:z", path.Join(prefixPath, "/etc/kubernetes")),
+                "/usr/lib/modules:/lib/modules",
 	}
 
 	for arg, value := range c.Services.Kubeproxy.ExtraArgs {

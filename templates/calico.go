@@ -235,10 +235,10 @@ spec:
               value: "{{.ClusterCIDR}}"
             # Enable IPIP
             - name: CALICO_IPV4POOL_IPIP
-              value: "Always"
+              value: "Off"
             # Enable IP-in-IP within Felix.
-            - name: FELIX_IPINIPENABLED
-              value: "true"
+            #- name: FELIX_IPINIPENABLED
+            #  value: "true"
             # Typha support: controlled by the ConfigMap.
             - name: FELIX_TYPHAK8SSERVICENAME
               valueFrom:
