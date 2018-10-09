@@ -27,14 +27,25 @@ import (
 
 const (
 	DockerRegistryURL = "docker.io"
-	RestartTimeout    = 30
+	// RestartTimeout in seconds
+	RestartTimeout = 30
+	// StopTimeout in seconds
+	StopTimeout = 5
 )
 
 var K8sDockerVersions = map[string][]string{
 	"1.8":  {"1.11.x", "1.12.x", "1.13.x", "17.03.x"},
 	"1.9":  {"1.11.x", "1.12.x", "1.13.x", "17.03.x"},
 	"1.10": {"1.11.x", "1.12.x", "1.13.x", "17.03.x"},
+	"1.11": {"1.11.x", "1.12.x", "1.13.x", "17.03.x"},
+	"1.12": {"1.11.x", "1.12.x", "1.13.x", "17.03.x", "17.06.x", "17.09.x", "18.06.x"},
 }
+
+type dockerConfig struct {
+	Auths map[string]authConfig `json:"auths,omitempty"`
+}
+
+type authConfig types.AuthConfig
 
 func DoRunContainer(ctx context.Context, dClient *client.Client, imageCfg *container.Config, hostCfg *container.HostConfig, containerName string, hostname string, plane string, prsMap map[string]v3.PrivateRegistry) error {
 	container, err := dClient.ContainerInspect(ctx, containerName)
@@ -129,12 +140,6 @@ func DoRemoveContainer(ctx context.Context, dClient *client.Client, containerNam
 		}
 		return err
 	}
-	logrus.Debugf("[remove/%s] Stopping container on host [%s]", containerName, hostname)
-	err = StopContainer(ctx, dClient, hostname, containerName)
-	if err != nil {
-		return err
-	}
-
 	logrus.Debugf("[remove/%s] Removing container on host [%s]", containerName, hostname)
 	err = RemoveContainer(ctx, dClient, hostname, containerName)
 	if err != nil {
@@ -218,7 +223,7 @@ func UseLocalOrPull(ctx context.Context, dClient *client.Client, hostname string
 }
 
 func RemoveContainer(ctx context.Context, dClient *client.Client, hostname string, containerName string) error {
-	err := dClient.ContainerRemove(ctx, containerName, types.ContainerRemoveOptions{})
+	err := dClient.ContainerRemove(ctx, containerName, types.ContainerRemoveOptions{Force: true})
 	if err != nil {
 		return fmt.Errorf("Can't remove Docker container [%s] for host [%s]: %v", containerName, hostname, err)
 	}
@@ -226,7 +231,9 @@ func RemoveContainer(ctx context.Context, dClient *client.Client, hostname strin
 }
 
 func StopContainer(ctx context.Context, dClient *client.Client, hostname string, containerName string) error {
-	err := dClient.ContainerStop(ctx, containerName, nil)
+	// define the stop timeout
+	stopTimeoutDuration := StopTimeout * time.Second
+	err := dClient.ContainerStop(ctx, containerName, &stopTimeoutDuration)
 	if err != nil {
 		return fmt.Errorf("Can't stop Docker container [%s] for host [%s]: %v", containerName, hostname, err)
 	}
@@ -433,4 +440,18 @@ func isContainerEnvChanged(containerEnv, imageConfigEnv, dockerfileEnv []string)
 	// remove PATH env from the container env
 	allImageEnv := append(imageConfigEnv, dockerfileEnv...)
 	return sliceEqualsIgnoreOrder(allImageEnv, containerEnv)
+}
+
+func GetKubeletDockerConfig(prsMap map[string]v3.PrivateRegistry) (string, error) {
+	auths := map[string]authConfig{}
+
+	for url, pr := range prsMap {
+		auth := base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", pr.User, pr.Password)))
+		auths[url] = authConfig{Auth: auth}
+	}
+	cfg, err := json.Marshal(dockerConfig{auths})
+	if err != nil {
+		return "", err
+	}
+	return string(cfg), nil
 }

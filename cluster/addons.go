@@ -44,6 +44,7 @@ type MetricsServerOptions struct {
 	RBACConfig         string
 	Options            map[string]string
 	MetricsServerImage string
+	Version            string
 }
 
 type addonError struct {
@@ -204,10 +205,14 @@ func (c *Cluster) deployKubeDNS(ctx context.Context) error {
 
 func (c *Cluster) deployMetricServer(ctx context.Context) error {
 	log.Infof(ctx, "[addons] Setting up Metrics Server")
+	s := strings.Split(c.SystemImages.MetricsServer, ":")
+	versionTag := s[len(s)-1]
+
 	MetricsServerConfig := MetricsServerOptions{
 		MetricsServerImage: c.SystemImages.MetricsServer,
 		RBACConfig:         c.Authorization.Mode,
 		Options:            c.Monitoring.Options,
+		Version:            getTagMajorVersion(versionTag),
 	}
 	metricsYaml, err := addons.GetMetricsServerManifest(MetricsServerConfig)
 	if err != nil {
@@ -309,7 +314,6 @@ func (c *Cluster) StoreAddonConfigMap(ctx context.Context, addonYaml string, add
 			updated, err = k8s.UpdateConfigMap(kubeClient, []byte(addonYaml), addonName)
 			if err != nil {
 				time.Sleep(time.Second * 5)
-				fmt.Println(err)
 				continue
 			}
 			log.Infof(ctx, "[addons] Successfully Saved addon to Kubernetes ConfigMap: %s", addonName)
@@ -356,7 +360,6 @@ func (c *Cluster) deployIngress(ctx context.Context) error {
 		Options:        c.Ingress.Options,
 		NodeSelector:   c.Ingress.NodeSelector,
 		ExtraArgs:      c.Ingress.ExtraArgs,
-		AlpineImage:    c.SystemImages.Alpine,
 		IngressImage:   c.SystemImages.Ingress,
 		IngressBackend: c.SystemImages.IngressBackend,
 	}
