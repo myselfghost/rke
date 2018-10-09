@@ -10,7 +10,6 @@ import (
 
 	b64 "encoding/base64"
 
-	"github.com/coreos/go-semver/semver"
 	ref "github.com/docker/distribution/reference"
 	"github.com/docker/docker/api/types"
 	"github.com/rancher/rke/cloudprovider/aws"
@@ -19,6 +18,7 @@ import (
 	"github.com/rancher/rke/k8s"
 	"github.com/rancher/rke/pki"
 	"github.com/rancher/rke/services"
+	"github.com/rancher/rke/util"
 	"github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 )
@@ -31,7 +31,13 @@ const (
 	DefaultToolsEntrypoint        = "/opt/rke-tools/entrypoint.sh"
 	DefaultToolsEntrypointVersion = "0.1.13"
 	LegacyToolsEntrypoint         = "/opt/rke/entrypoint.sh"
+
+	KubeletDockerConfigEnv     = "RKE_KUBELET_DOCKER_CONFIG"
+	KubeletDockerConfigFileEnv = "RKE_KUBELET_DOCKER_FILE"
+	KubeletDockerConfigPath    = "/var/lib/kubelet/config.json"
 )
+
+var admissionControlOptionNames = []string{"enable-admission-plugins", "admission-control"}
 
 func GeneratePlan(ctx context.Context, rkeConfig *v3.RancherKubernetesEngineConfig, hostsInfoMap map[string]types.Info) (v3.RKEPlan, error) {
 	clusterPlan := v3.RKEPlan{}
@@ -122,7 +128,6 @@ func (c *Cluster) BuildKubeAPIProcess(prefixPath string) v3.Process {
 		"kubelet-preferred-address-types":    "InternalIP,ExternalIP,Hostname",
 		"service-cluster-ip-range":           c.Services.KubeAPI.ServiceClusterIPRange,
 		"service-node-port-range":            c.Services.KubeAPI.ServiceNodePortRange,
-		"admission-control":                  "ServiceAccount,NamespaceLifecycle,LimitRanger,PersistentVolumeLabel,DefaultStorageClass,ResourceQuota,DefaultTolerationSeconds",
 		"storage-backend":                    "etcd3",
 		"client-ca-file":                     pki.GetCertPath(pki.CACertName),
 		"tls-cert-file":                      pki.GetCertPath(pki.KubeAPICertName),
@@ -155,6 +160,11 @@ func (c *Cluster) BuildKubeAPIProcess(prefixPath string) v3.Process {
 	serviceOptions := c.GetKubernetesServicesOptions()
 	if serviceOptions.KubeAPI != nil {
 		for k, v := range serviceOptions.KubeAPI {
+			// if the value is empty, we remove that option
+			if len(v) == 0 {
+				delete(CommandArgs, k)
+				continue
+			}
 			CommandArgs[k] = v
 		}
 	}
@@ -168,7 +178,12 @@ func (c *Cluster) BuildKubeAPIProcess(prefixPath string) v3.Process {
 	}
 	if c.Services.KubeAPI.PodSecurityPolicy {
 		CommandArgs["runtime-config"] = "extensions/v1beta1/podsecuritypolicy=true"
-		CommandArgs["admission-control"] = CommandArgs["admission-control"] + ",PodSecurityPolicy"
+		for _, optionName := range admissionControlOptionNames {
+			if _, ok := CommandArgs[optionName]; ok {
+				CommandArgs[optionName] = CommandArgs[optionName] + ",PodSecurityPolicy"
+				break
+			}
+		}
 	}
 
 	VolumesFrom := []string{
@@ -249,6 +264,11 @@ func (c *Cluster) BuildKubeControllerProcess(prefixPath string) v3.Process {
 	serviceOptions := c.GetKubernetesServicesOptions()
 	if serviceOptions.KubeController != nil {
 		for k, v := range serviceOptions.KubeController {
+			// if the value is empty, we remove that option
+			if len(v) == 0 {
+				delete(CommandArgs, k)
+				continue
+			}
 			CommandArgs[k] = v
 		}
 	}
@@ -310,7 +330,7 @@ func (c *Cluster) BuildKubeletProcess(host *hosts.Host, prefixPath string) v3.Pr
 	CommandArgs := map[string]string{
 		"v":                            "2",
 		"address":                      "0.0.0.0",
-		"cadvisor-port":                "0",
+		"cadvisor-port":                "0", //depricated in 1.12
 		"read-only-port":               "0",
 		"cluster-domain":               c.ClusterDomain,
 		"pod-infra-container-image":    c.Services.Kubelet.InfraContainerImage,
@@ -346,10 +366,26 @@ func (c *Cluster) BuildKubeletProcess(host *hosts.Host, prefixPath string) v3.Pr
 			c.Services.Kubelet.ExtraEnv,
 			fmt.Sprintf("%s=%s", CloudConfigSumEnv, getCloudConfigChecksum(c.CloudProvider)))
 	}
+	if len(c.PrivateRegistriesMap) > 0 {
+		kubeletDcokerConfig, _ := docker.GetKubeletDockerConfig(c.PrivateRegistriesMap)
+		c.Services.Kubelet.ExtraEnv = append(
+			c.Services.Kubelet.ExtraEnv,
+			fmt.Sprintf("%s=%s", KubeletDockerConfigEnv,
+				b64.StdEncoding.EncodeToString([]byte(kubeletDcokerConfig))))
+
+		c.Services.Kubelet.ExtraEnv = append(
+			c.Services.Kubelet.ExtraEnv,
+			fmt.Sprintf("%s=%s", KubeletDockerConfigFileEnv, path.Join(prefixPath, KubeletDockerConfigPath)))
+	}
 	// check if our version has specific options for this component
 	serviceOptions := c.GetKubernetesServicesOptions()
 	if serviceOptions.Kubelet != nil {
 		for k, v := range serviceOptions.Kubelet {
+			// if the value is empty, we remove that option
+			if len(v) == 0 {
+				delete(CommandArgs, k)
+				continue
+			}
 			CommandArgs[k] = v
 		}
 	}
@@ -437,6 +473,11 @@ func (c *Cluster) BuildKubeProxyProcess(host *hosts.Host, prefixPath string) v3.
 	serviceOptions := c.GetKubernetesServicesOptions()
 	if serviceOptions.Kubeproxy != nil {
 		for k, v := range serviceOptions.Kubeproxy {
+			// if the value is empty, we remove that option
+			if len(v) == 0 {
+				delete(CommandArgs, k)
+				continue
+			}
 			CommandArgs[k] = v
 		}
 	}
@@ -529,6 +570,11 @@ func (c *Cluster) BuildSchedulerProcess(prefixPath string) v3.Process {
 	serviceOptions := c.GetKubernetesServicesOptions()
 	if serviceOptions.Scheduler != nil {
 		for k, v := range serviceOptions.Scheduler {
+			// if the value is empty, we remove that option
+			if len(v) == 0 {
+				delete(CommandArgs, k)
+				continue
+			}
 			CommandArgs[k] = v
 		}
 	}
@@ -740,11 +786,11 @@ func (c *Cluster) getRKEToolsEntryPoint() string {
 
 	logrus.Debugf("Extracted version [%s] from image [%s]", last, c.SystemImages.KubernetesServicesSidecar)
 
-	sv, err := strToSemVer(last)
+	sv, err := util.StrToSemVer(last)
 	if err != nil {
 		return DefaultToolsEntrypoint
 	}
-	svdefault, err := strToSemVer(DefaultToolsEntrypointVersion)
+	svdefault, err := util.StrToSemVer(DefaultToolsEntrypointVersion)
 	if err != nil {
 		return DefaultToolsEntrypoint
 	}
@@ -753,12 +799,4 @@ func (c *Cluster) getRKEToolsEntryPoint() string {
 		return LegacyToolsEntrypoint
 	}
 	return DefaultToolsEntrypoint
-}
-
-func strToSemVer(version string) (*semver.Version, error) {
-	v, err := semver.NewVersion(strings.TrimPrefix(version, "v"))
-	if err != nil {
-		return nil, err
-	}
-	return v, nil
 }

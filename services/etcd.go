@@ -3,7 +3,6 @@ package services
 import (
 	"fmt"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,9 +20,10 @@ import (
 )
 
 const (
-	EtcdSnapshotPath = "/opt/rke/etcd-snapshots"
+	EtcdSnapshotPath = "/opt/rke/etcd-snapshots/"
 	EtcdRestorePath  = "/opt/rke/etcd-snapshots-restore/"
 	EtcdDataDir      = "/var/lib/rancher/etcd/"
+	EtcdInitWaitTime = 5
 )
 
 type EtcdSnapshot struct {
@@ -162,8 +162,12 @@ func RemoveEtcdMember(ctx context.Context, etcdHost *hosts.Host, etcdHosts []*ho
 	return nil
 }
 
-func ReloadEtcdCluster(ctx context.Context, readyEtcdHosts []*hosts.Host, localConnDialerFactory hosts.DialerFactory, cert, key []byte, prsMap map[string]v3.PrivateRegistry, etcdNodePlanMap map[string]v3.RKEConfigNodePlan, alpineImage string) error {
+func ReloadEtcdCluster(ctx context.Context, readyEtcdHosts []*hosts.Host, newHost *hosts.Host, localConnDialerFactory hosts.DialerFactory, cert, key []byte, prsMap map[string]v3.PrivateRegistry, etcdNodePlanMap map[string]v3.RKEConfigNodePlan, alpineImage string) error {
+	// update the old nodes
 	for _, etcdHost := range readyEtcdHosts {
+		if etcdHost.Address == newHost.Address {
+			continue
+		}
 		imageCfg, hostCfg, _ := GetProcessConfig(etcdNodePlanMap[etcdHost.Address].Processes[EtcdContainerName])
 		if err := docker.DoRunContainer(ctx, etcdHost.DClient, imageCfg, hostCfg, EtcdContainerName, etcdHost.Address, ETCDRole, prsMap); err != nil {
 			return err
@@ -171,6 +175,15 @@ func ReloadEtcdCluster(ctx context.Context, readyEtcdHosts []*hosts.Host, localC
 		if err := createLogLink(ctx, etcdHost, EtcdContainerName, ETCDRole, alpineImage, prsMap); err != nil {
 			return err
 		}
+		time.Sleep(EtcdInitWaitTime * time.Second)
+	}
+	// run the new etcd at last
+	imageCfg, hostCfg, _ := GetProcessConfig(etcdNodePlanMap[newHost.Address].Processes[EtcdContainerName])
+	if err := docker.DoRunContainer(ctx, newHost.DClient, imageCfg, hostCfg, EtcdContainerName, newHost.Address, ETCDRole, prsMap); err != nil {
+		return err
+	}
+	if err := createLogLink(ctx, newHost, EtcdContainerName, ETCDRole, alpineImage, prsMap); err != nil {
+		return err
 	}
 	time.Sleep(10 * time.Second)
 	var healthy bool
@@ -266,7 +279,7 @@ func RunEtcdSnapshotSave(ctx context.Context, etcdHost *hosts.Host, prsMap map[s
 func RestoreEtcdSnapshot(ctx context.Context, etcdHost *hosts.Host, prsMap map[string]v3.PrivateRegistry, etcdRestoreImage, snapshotName, initCluster string) error {
 	log.Infof(ctx, "[etcd] Restoring [%s] snapshot on etcd host [%s]", snapshotName, etcdHost.Address)
 	nodeName := pki.GetEtcdCrtName(etcdHost.InternalAddress)
-	snapshotPath := filepath.Join(EtcdSnapshotPath, snapshotName)
+	snapshotPath := fmt.Sprintf("%s%s", EtcdSnapshotPath, snapshotName)
 
 	// make sure that restore path is empty otherwise etcd restore will fail
 	imageCfg := &container.Config{
